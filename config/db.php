@@ -49,7 +49,7 @@ function db(): PDO
         ]);
     } catch (PDOException $e) {
         // Não vazar usuário/host/senha para o navegador
-                error_log('Erro de conexão com o banco: ' . $e->getMessage());
+        error_log('Erro de conexão com o banco: ' . $e->getMessage());
         http_response_code(500);
         exit('Erro ao conectar ao banco de dados.'
             . (env('APP_DEBUG') === '1' ? ' [' . $e->getMessage() . ']' : ''));
