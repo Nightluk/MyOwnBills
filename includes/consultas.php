@@ -1,60 +1,88 @@
 <?php
-/** Consultas ao banco usadas pelas páginas. Todas filtram pelo usuário logado. */
+// Adicione estas funções ao final de includes/consultas.php
 
-/** Receita/entrada soma; qualquer outro tipo é despesa. Ajuste conforme os valores de tb_categorias.ds_tipo. */
-function eh_receita(?string $tipo): bool
+function listar_categorias(PDO $pdo): array
 {
-    return in_array(mb_strtolower(trim((string) $tipo)), ['receita', 'entrada'], true);
+    $st = $pdo->query('select cd_categoria, nm_categoria, ds_tipo from tb_categorias order by nm_categoria');
+    return $st->fetchAll();
 }
 
-function listar_transacoes(PDO $pdo, string $idUsuario, ?int $limite = null): array
+function listar_formas_pagamento(PDO $pdo): array
 {
-    $sql = 'select t.cd_transacao, t.ds_transacao, t.vl_transacao, t.dt_transacao,
-                   t.nr_parcela, t.qt_parcelas,
-                   c.nm_categoria, c.ds_tipo,
-                   f.nm_forma_pagamento,
-                   k.nm_cartao
-            from tb_transacoes t
-            join tb_categorias c on c.cd_categoria = t.cd_categoria
-            join tb_formas_pagamento f on f.cd_forma_pagamento = t.cd_forma_pagamento
-            left join tb_cartoes_credito k on k.cd_cartao = t.cd_cartao
-            where t.cd_usuario = :u
-            order by t.dt_transacao desc, t.cd_transacao desc';
-    if ($limite !== null) {
-        $sql .= ' limit ' . (int) $limite;
-    }
+    $st = $pdo->query('select cd_forma_pagamento, nm_forma_pagamento from tb_formas_pagamento order by nm_forma_pagamento');
+    return $st->fetchAll();
+}
+
+function criar_cartao(PDO $pdo, string $idUsuario, array $dados): void
+{
+    $sql = 'insert into tb_cartoes_credito
+                (cd_usuario, nm_cartao, vl_limite, nr_dia_fechamento, nr_dia_vencimento, nr_ultimos4)
+            values
+                (:u, :nm, :lim, :fech, :venc, :u4)';
     $st = $pdo->prepare($sql);
-    $st->execute([':u' => $idUsuario]);
-    return $st->fetchAll();
+    $st->execute([
+        ':u'    => $idUsuario,
+        ':nm'   => $dados['nm_cartao'],
+        ':lim'  => $dados['vl_limite'],
+        ':fech' => $dados['nr_dia_fechamento'],
+        ':venc' => $dados['nr_dia_vencimento'],
+        ':u4'   => $dados['nr_ultimos4'] ?: null,
+    ]);
 }
 
-function listar_cartoes(PDO $pdo, string $idUsuario): array
+/**
+ * Registra uma transação à vista (1x) ou parcelada (ex: até 12x).
+ * Se $qtParcelas > 1, divide o valor total e avança 1 mês por parcela.
+ */
+function criar_transacao(PDO $pdo, string $idUsuario, array $dados): void
 {
-    $st = $pdo->prepare(
-        "select k.cd_cartao, k.nm_cartao, k.vl_limite, k.nr_dia_fechamento, k.nr_dia_vencimento, k.nr_ultimos4,
-                coalesce((select sum(fa.vl_total) from tb_faturas fa
-                          where fa.cd_cartao = k.cd_cartao and fa.ds_status = 'Aberta'), 0) as vl_fatura_aberta
-         from tb_cartoes_credito k
-         where k.cd_usuario = :u
-         order by k.nm_cartao"
-    );
-    $st->execute([':u' => $idUsuario]);
-    return $st->fetchAll();
+    $qtParcelas = max(1, min(60, (int) ($dados['qt_parcelas'] ?? 1)));
+    $valorTotal = (float) $dados['vl_transacao'];
+    $valorParcela = round($valorTotal / $qtParcelas, 2);
+    $cdCartao = !empty($dados['cd_cartao']) ? (int) $dados['cd_cartao'] : null;
+
+    $pdo->beginTransaction();
+    try {
+        $sql = 'insert into tb_transacoes
+                    (cd_usuario, ds_transacao, vl_transacao, dt_transacao,
+                     nr_parcela, qt_parcelas, cd_categoria, cd_forma_pagamento, cd_cartao)
+                values
+                    (:u, :ds, :vl, :dt, :nr_p, :qt_p, :cat, :fp, :cart)';
+        $st = $pdo->prepare($sql);
+
+        $dataBase = new DateTimeImmutable($dados['dt_transacao']);
+
+        for ($i = 1; $i <= $qtParcelas; $i++) {
+            // Ajusta centavos residuais na última parcela para bater o total
+            $vlAtual = ($i === $qtParcelas)
+                ? round($valorTotal - ($valorParcela * ($qtParcelas - 1)), 2)
+                : $valorParcela;
+
+            $dtParcela = $dataBase->modify('+' . ($i - 1) . ' months')->format('Y-m-d');
+
+            $st->execute([
+                ':u'    => $idUsuario,
+                ':ds'   => $dados['ds_transacao'],
+                ':vl'   => $vlAtual,
+                ':dt'   => $dtParcela,
+                ':nr_p' => $i,
+                ':qt_p' => $qtParcelas,
+                ':cat'  => (int) $dados['cd_categoria'],
+                ':fp'   => (int) $dados['cd_forma_pagamento'],
+                ':cart' => $cdCartao,
+            ]);
+        }
+
+        // Se houver vínculo com cartão e tb_faturas aberta, atualiza ou cria conforme seu schema
+        $pdo->commit();
+    } catch (Throwable $e) {
+        $pdo->rollBack();
+        throw $e;
+    }
 }
 
-/** HTML de uma linha de transação (usado na home e no histórico). */
-function linha_transacao(array $t): string
+function excluir_transacao(PDO $pdo, string $idUsuario, int $cdTransacao): void
 {
-    $receita = eh_receita($t['ds_tipo']);
-    $cor = $receita ? 'text-success' : 'text-danger';
-    $sinal = $receita ? '+' : '-';
-    $origem = $t['nm_cartao'] ? $t['nm_cartao'] . ' - ' : '';
-    $parcela = (int) $t['qt_parcelas'] > 1 ? " • {$t['nr_parcela']}/{$t['qt_parcelas']}" : '';
-    $data = date('d/m/Y', strtotime($t['dt_transacao']));
-
-    return '<div class="bg-white p-2 px-3 rounded-pill d-flex align-items-center justify-content-between shadow-sm">'
-        . '<div><div class="small fw-bold text-dark" style="font-size: 13px;">' . e($origem . $t['ds_transacao']) . '</div>'
-        . '<div class="text-muted" style="font-size: 11px;">' . e($data . ' • ' . $t['nm_forma_pagamento'] . ' • ' . $t['nm_categoria'] . $parcela) . '</div></div>'
-        . '<span class="' . $cor . ' fw-bold small ms-3 text-nowrap">' . $sinal . ' ' . e(moeda((float) $t['vl_transacao'])) . '</span>'
-        . '</div>';
+    $st = $pdo->prepare('delete from tb_transacoes where cd_transacao = :id and cd_usuario = :u');
+    $st->execute([':id' => $cdTransacao, ':u' => $idUsuario]);
 }
