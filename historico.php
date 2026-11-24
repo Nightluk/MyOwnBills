@@ -4,7 +4,30 @@ require __DIR__ . '/config/db.php';
 require __DIR__ . '/includes/consultas.php';
 exigir_login();
 
-$transacoes = listar_transacoes(db(), usuario_atual()['id']);
+$uid = usuario_atual()['id'];
+$pdo = db();
+
+$mes = $_GET['mes'] ?? $_POST['mes'] ?? '';
+if (!mes_valido($mes)) {
+    $mes = date('Y-m');
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!csrf_valido()) {
+        flash('Sessão expirada. Tente de novo.', 'danger');
+    } elseif (($_POST['acao'] ?? '') === 'excluir') {
+        try {
+            $ok = em_transacao($pdo, fn() => excluir_compra($pdo, $uid, (int) ($_POST['id'] ?? 0)));
+            flash($ok ? 'Lançamento excluído.' : 'Lançamento não encontrado.', $ok ? 'success' : 'danger');
+        } catch (RuntimeException $ex) {
+            flash($ex->getMessage(), 'danger');
+        }
+    }
+    redirecionar('historico.php?mes=' . $mes);
+}
+
+$transacoes = listar_transacoes_mes($pdo, $uid, $mes);
+$tot = totais($transacoes);
 $ativa = 'historico';
 ?>
 <!doctype html>
@@ -24,15 +47,32 @@ $ativa = 'historico';
 
     <?php include __DIR__ . '/includes/navbar.php'; ?>
 
-    <main class="container my-4 flex-grow-1" style="max-width: 800px;">
-        <h2 class="h5 fw-bold mb-3">Histórico de transações</h2>
+    <main class="container my-4 flex-grow-1" style="max-width: 820px;">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h2 class="h5 fw-bold mb-0">Histórico</h2>
+            <a href="transacao_form.php" class="btn btn-success btn-sm rounded-pill px-3"><i class="bi bi-plus-lg me-1"></i>Novo lançamento</a>
+        </div>
+
+        <?= exibir_flash() ?>
+
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <a class="btn btn-sm btn-outline-secondary" href="historico.php?mes=<?= e(mes_deslocado($mes, -1)) ?>"><i class="bi bi-chevron-left"></i></a>
+            <span class="fw-semibold text-capitalize"><?= e(nome_mes($mes)) ?></span>
+            <a class="btn btn-sm btn-outline-secondary" href="historico.php?mes=<?= e(mes_deslocado($mes, 1)) ?>"><i class="bi bi-chevron-right"></i></a>
+        </div>
+
+        <div class="row g-2 mb-3 text-center">
+            <div class="col-4"><div class="bg-body rounded-4 shadow-sm p-2"><div class="small text-body-secondary">Receitas</div><div class="fw-bold text-success"><?= e(moeda($tot['receitas'])) ?></div></div></div>
+            <div class="col-4"><div class="bg-body rounded-4 shadow-sm p-2"><div class="small text-body-secondary">Despesas</div><div class="fw-bold text-danger"><?= e(moeda($tot['despesas'])) ?></div></div></div>
+            <div class="col-4"><div class="bg-body rounded-4 shadow-sm p-2"><div class="small text-body-secondary">Saldo</div><div class="fw-bold"><?= e(moeda($tot['saldo'])) ?></div></div></div>
+        </div>
 
         <div class="d-flex flex-column gap-2">
             <?php if (!$transacoes): ?>
-                <div class="text-center text-body-secondary py-5">Nenhuma transação registrada ainda.</div>
+                <div class="text-center text-body-secondary py-5">Nenhum lançamento neste mês.</div>
             <?php endif; ?>
             <?php foreach ($transacoes as $t): ?>
-                <?= linha_transacao($t) ?>
+                <?= linha_transacao($t, true, $mes) ?>
             <?php endforeach; ?>
         </div>
     </main>

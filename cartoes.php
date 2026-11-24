@@ -4,48 +4,24 @@ require __DIR__ . '/config/db.php';
 require __DIR__ . '/includes/consultas.php';
 exigir_login();
 
+$uid = usuario_atual()['id'];
 $pdo = db();
-$usuarioId = usuario_atual()['id'];
-$erro = '';
-$sucesso = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!csrf_valido()) {
-        $erro = 'Sessão expirada. Recarregue a página.';
-    } else {
-        $nmCartao = trim($_POST['nm_cartao'] ?? '');
-        $vlLimite = filter_input(INPUT_POST, 'vl_limite', FILTER_VALIDATE_FLOAT);
-        $diaFech  = filter_input(INPUT_POST, 'nr_dia_fechamento', FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => 31]]);
-        $diaVenc  = filter_input(INPUT_POST, 'nr_dia_vencimento', FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => 31]]);
-        $ultimos4 = preg_replace('/\D/', '', $_POST['nr_ultimos4'] ?? '');
-
-        if (mb_strlen($nmCartao) < 2 || mb_strlen($nmCartao) > 60) {
-            $erro = 'Informe um nome válido para o cartão.';
-        } elseif ($vlLimite === false || $vlLimite <= 0) {
-            $erro = 'Informe um limite maior que zero.';
-        } elseif (!$diaFech || !$diaVenc) {
-            $erro = 'Dias de fechamento e vencimento devem estar entre 1 e 31.';
-        } elseif ($ultimos4 !== '' && strlen($ultimos4) !== 4) {
-            $erro = 'Os últimos dígitos devem ter exatamente 4 números.';
-        } else {
-            criar_cartao($pdo, $usuarioId, [
-                'nm_cartao'         => $nmCartao,
-                'vl_limite'         => $vlLimite,
-                'nr_dia_fechamento' => $diaFech,
-                'nr_dia_vencimento' => $diaVenc,
-                'nr_ultimos4'       => $ultimos4,
-            ]);
-            header('Location: cartoes.php?ok=1');
-            exit;
+        flash('Sessão expirada. Tente de novo.', 'danger');
+    } elseif (($_POST['acao'] ?? '') === 'excluir') {
+        try {
+            excluir_cartao($pdo, $uid, (int) ($_POST['id'] ?? 0));
+            flash('Cartão excluído.');
+        } catch (RuntimeException $ex) {
+            flash($ex->getMessage(), 'danger');
         }
     }
+    redirecionar('cartoes.php');
 }
 
-if (isset($_GET['ok'])) {
-    $sucesso = 'Cartão adicionado com sucesso!';
-}
-
-$cartoes = listar_cartoes($pdo, $usuarioId);
+$cartoes = listar_cartoes($pdo, $uid);
 $ativa = 'cartoes';
 ?>
 <!doctype html>
@@ -66,49 +42,26 @@ $ativa = 'cartoes';
     <?php include __DIR__ . '/includes/navbar.php'; ?>
 
     <main class="container my-4 flex-grow-1">
-        <h2 class="h5 fw-bold mb-3">Meus cartões</h2>
-
-        <?php if ($erro): ?>
-            <div class="alert alert-danger py-2 small" role="alert"><?= e($erro) ?></div>
-        <?php endif; ?>
-        <?php if ($sucesso): ?>
-            <div class="alert alert-success py-2 small" role="alert"><?= e($sucesso) ?></div>
-        <?php endif; ?>
-
-        <div class="card border-0 shadow-sm rounded-4 p-3 mb-4">
-            <h3 class="h6 fw-bold mb-3"><i class="bi bi-plus-circle me-1"></i>Novo cartão</h3>
-            <form method="post" action="cartoes.php" class="row g-2">
-                <?= csrf_campo() ?>
-                <div class="col-md-4">
-                    <input type="text" name="nm_cartao" class="form-control" placeholder="Nome (ex: Nubank, Inter)" value="<?= e($_POST['nm_cartao'] ?? '') ?>" required maxlength="60">
-                </div>
-                <div class="col-md-2">
-                    <input type="number" step="0.01" min="0.01" name="vl_limite" class="form-control" placeholder="Limite (R$)" value="<?= e($_POST['vl_limite'] ?? '') ?>" required>
-                </div>
-                <div class="col-md-2">
-                    <input type="number" min="1" max="31" name="nr_dia_fechamento" class="form-control" placeholder="Dia fecha" value="<?= e($_POST['nr_dia_fechamento'] ?? '') ?>" required>
-                </div>
-                <div class="col-md-2">
-                    <input type="number" min="1" max="31" name="nr_dia_vencimento" class="form-control" placeholder="Dia vence" value="<?= e($_POST['nr_dia_vencimento'] ?? '') ?>" required>
-                </div>
-                <div class="col-md-2">
-                    <input type="text" name="nr_ultimos4" class="form-control" placeholder="Final (ex: 1234)" value="<?= e($_POST['nr_ultimos4'] ?? '') ?>" maxlength="4">
-                </div>
-                <div class="col-12 text-end mt-2">
-                    <button type="submit" class="btn btn-success btn-sm px-4 rounded-pill">Adicionar cartão</button>
-                </div>
-            </form>
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h2 class="h5 fw-bold mb-0">Meus cartões</h2>
+            <a href="cartao_form.php" class="btn btn-success btn-sm rounded-pill px-3"><i class="bi bi-plus-lg me-1"></i>Novo cartão</a>
         </div>
 
+        <?= exibir_flash() ?>
+
         <?php if (!$cartoes): ?>
-            <div class="text-center text-body-secondary py-5">Nenhum cartão cadastrado ainda.</div>
+            <div class="text-center text-body-secondary py-5">
+                Nenhum cartão cadastrado ainda.<br>
+                <a href="cartao_form.php" class="btn btn-success mt-3">Cadastrar meu primeiro cartão</a>
+            </div>
         <?php endif; ?>
 
         <div class="row g-3">
             <?php foreach ($cartoes as $k):
                 $limite = (float) $k['vl_limite'];
-                $usado = (float) $k['vl_fatura_aberta'];
+                $usado = (float) $k['vl_comprometido'];
                 $pct = $limite > 0 ? min(100, round($usado / $limite * 100)) : 0;
+                $barra = $pct >= 90 ? 'bg-danger' : ($pct >= 70 ? 'bg-warning' : 'bg-success');
             ?>
                 <div class="col-md-6 col-lg-4">
                     <div class="card border-0 shadow-sm rounded-4 p-3 h-100">
@@ -118,12 +71,25 @@ $ativa = 'cartoes';
                                 <span class="small text-body-secondary">•••• <?= e($k['nr_ultimos4']) ?></span>
                             <?php endif; ?>
                         </div>
-                        <div class="small text-body-secondary mb-1">Fatura aberta: <?= e(moeda($usado)) ?> de <?= e(moeda($limite)) ?></div>
-                        <div class="progress mb-2" style="height: 8px;">
-                            <div class="progress-bar bg-success" style="width: <?= $pct ?>%"></div>
+                        <div class="small text-body-secondary mb-1">
+                            Comprometido: <?= e(moeda($usado)) ?> de <?= e(moeda($limite)) ?>
+                            <span class="text-body-tertiary">(disponível <?= e(moeda(max(0, $limite - $usado))) ?>)</span>
                         </div>
-                        <div class="small text-body-secondary">
+                        <div class="progress mb-2" style="height: 8px;">
+                            <div class="progress-bar <?= $barra ?>" style="width: <?= $pct ?>%"></div>
+                        </div>
+                        <div class="small text-body-secondary mb-3">
                             Fecha dia <?= (int) $k['nr_dia_fechamento'] ?> • Vence dia <?= (int) $k['nr_dia_vencimento'] ?>
+                        </div>
+                        <div class="d-flex gap-2 mt-auto">
+                            <a href="fatura.php?cartao=<?= (int) $k['cd_cartao'] ?>" class="btn btn-sm btn-success flex-grow-1">Faturas</a>
+                            <a href="cartao_form.php?id=<?= (int) $k['cd_cartao'] ?>" class="btn btn-sm btn-outline-secondary" title="Editar"><i class="bi bi-pencil"></i></a>
+                            <form method="post" action="cartoes.php" class="m-0" onsubmit="return confirm('Excluir o cartão <?= e(addslashes($k['nm_cartao'])) ?>?')">
+                                <?= csrf_campo() ?>
+                                <input type="hidden" name="acao" value="excluir">
+                                <input type="hidden" name="id" value="<?= (int) $k['cd_cartao'] ?>">
+                                <button class="btn btn-sm btn-outline-danger" title="Excluir"><i class="bi bi-trash"></i></button>
+                            </form>
                         </div>
                     </div>
                 </div>
