@@ -1,0 +1,9 @@
+.env
+.git
+.gitignore
+.dockerignore
+Dockerfile
+README.md
+banco
+testes
+*.zip
